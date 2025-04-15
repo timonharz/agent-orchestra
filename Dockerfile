@@ -17,16 +17,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create certs directory
+# Create certs directory for SSL if needed
 RUN mkdir -p certs
 
-# Expose the port
-EXPOSE 8443
+# Expose HTTP and HTTPS ports
+EXPOSE 80 443
 
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV HOST=0.0.0.0
-ENV PORT=8443
+ENV PORT=80
 
 # Run the application
 CMD ["python", "server.py"]

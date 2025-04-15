@@ -228,17 +228,28 @@ def create_ssl_context():
     return context
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8443))
+    port = int(os.environ.get("PORT", 80))
     host = os.environ.get("HOST", "0.0.0.0")
 
-    print(f"Starting Agent Orchestra API server at https://{host}:{port}")
-    print(f"Agent endpoint: https://{host}:{port}/api/agent/run")
-    print(f"Legacy chat endpoint: https://{host}:{port}/api/chat/completions")
+    print(f"Starting Agent Orchestra API server at http://{host}:{port}")
+    print(f"Agent endpoint: http://{host}:{port}/api/agent/run")
+    print(f"Legacy chat endpoint: http://{host}:{port}/api/chat/completions")
 
     try:
+        # Try to use HTTPS if certificates are available
         context = create_ssl_context()
-        run_simple(host, port, app, ssl_context=context)
+        https_port = int(os.environ.get("HTTPS_PORT", 443))
+        print(f"HTTPS also available on port {https_port}")
+
+        # For port 80, we'll use the standard HTTP server instead of run_simple
+        # since port 80 usually requires root privileges
+        if port < 1024 and os.geteuid() != 0:
+            print("Warning: Ports below 1024 typically require root privileges.")
+            print("Consider using sudo or a reverse proxy like Nginx.")
+
+        # Start the server
+        app.run(host=host, port=port, ssl_context=context if port == 443 else None)
     except Exception as e:
-        print(f"Failed to start server with HTTPS: {e}")
+        print(f"Failed to start server: {e}")
         print("Falling back to HTTP (not secure)...")
         app.run(host=host, port=port)

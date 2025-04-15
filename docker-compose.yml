@@ -1,16 +1,16 @@
-version: '3.8'
+version: '3'
 
 services:
-  api:
+  agent-orchestra:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8443:8443"
-    volumes:
-      - ./certs:/app/certs
-      - ./config:/app/config
+      - "80:80"
     environment:
-      - PORT=8443
+      - PORT=80
       - HOST=0.0.0.0
-    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./workspace:/app/workspace
+    restart: always
