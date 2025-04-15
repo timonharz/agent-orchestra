@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/logo.jpg" width="200"/>
-</p>
-
 English | [中文](README_zh.md) | [한국어](README_ko.md) | [日本語](README_ja.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
