@@ -2,6 +2,7 @@ import os
 import ssl
 import time
 import uuid
+import asyncio
 from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, request
@@ -9,18 +10,20 @@ from flask_cors import CORS
 from werkzeug.serving import run_simple
 
 from app.llm import LLM
+from app.agent.manus import ManusAgent
+from app.agent.toolcall import ToolCallAgent
 from app.schema import Message
 
 app = Flask(__name__)
 CORS(app)
 
-# Initialize LLM client
-llm_client = None
+# Initialize agent cache
+agent_cache = {}
 
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
-    return jsonify({"status": "healthy", "service": "OpenManus API"})
+    return jsonify({"status": "healthy", "service": "Agent Orchestra API"})
 
 @app.route("/api/models", methods=["GET"])
 def list_models():
@@ -29,14 +32,60 @@ def list_models():
         "models": [
             {"id": "openai/gpt-4o", "name": "GPT-4o", "provider": "OpenAI via OpenRouter"},
             {"id": "anthropic/claude-3-opus", "name": "Claude 3 Opus", "provider": "Anthropic via OpenRouter"},
-            {"id": "mistral/mistral-large", "name": "Mistral Large", "provider": "Mistral via OpenRouter"}
+            {"id": "mistral/mistral-large", "name": "Mistral Large", "provider": "Mistral via OpenRouter"},
+            {"id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash", "provider": "Google"}
         ]
     }
     return jsonify(models)
 
-@app.route("/api/chat/completions", methods=["POST"])
-async def chat_completions():
-    """Process chat completion requests"""
+def get_agent_for_model(model_name: str, agent_id: str = None):
+    """Get or create an agent for the specified model"""
+    config_name = "default"
+    if model_name.startswith("anthropic/"):
+        config_name = "anthropic"
+    elif model_name.startswith("mistral/"):
+        config_name = "mistral"
+    elif model_name.startswith("google/"):
+        config_name = "gemini"
+
+    # Create a unique agent ID if not provided
+    if not agent_id:
+        agent_id = f"{config_name}-{str(uuid.uuid4())[:8]}"
+
+    # Create a cache key
+    cache_key = f"{agent_id}-{model_name}"
+
+    # Return cached agent if exists
+    if cache_key in agent_cache:
+        return agent_cache[cache_key], cache_key
+
+    # Initialize LLM for the agent
+    llm = LLM(config_name=config_name)
+
+    # Create a new agent
+    if model_name.endswith("vision"):
+        # Vision-capable agent
+        agent = ToolCallAgent(
+            name=agent_id,
+            llm=llm,
+            description="Vision-capable agent that can process images and use tools"
+        )
+    else:
+        # Default agent
+        agent = ManusAgent(
+            name=agent_id,
+            llm=llm,
+            description="General-purpose agent with tool-using capabilities"
+        )
+
+    # Cache the agent
+    agent_cache[cache_key] = agent
+
+    return agent, cache_key
+
+@app.route("/api/agent/run", methods=["POST"])
+async def run_agent():
+    """Process requests through the agent system"""
     try:
         data = request.json
         if not data:
@@ -45,33 +94,83 @@ async def chat_completions():
         # Extract request parameters
         model = data.get("model", "openai/gpt-4o")
         messages = data.get("messages", [])
-        stream = data.get("stream", False)
+        agent_id = data.get("agent_id")
+        task = data.get("task")
+
+        # Convert messages to the format expected by the agent
+        formatted_messages = []
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+
+            if role == "user":
+                formatted_messages.append(Message.user_message(content))
+            elif role == "assistant":
+                formatted_messages.append(Message.assistant_message(content))
+            elif role == "system":
+                formatted_messages.append(Message.system_message(content))
+
+        # Get or create an agent for this request
+        agent, cache_key = get_agent_for_model(model, agent_id)
+
+        # Add messages to agent memory
+        for msg in formatted_messages:
+            agent.memory.add_message(msg)
+
+        # Set task if provided
+        if task:
+            # Create a response to process through the agent
+            response = await agent.process_task(task)
+        else:
+            # Use the last user message as the task
+            last_user_msg = next((msg for msg in reversed(formatted_messages)
+                                if isinstance(msg, Message) and msg.role == "user"), None)
+            if last_user_msg:
+                response = await agent.process_message(last_user_msg.content)
+            else:
+                return jsonify({"error": "No user message or task provided"}), 400
+
+        # Format response
+        result = {
+            "id": f"agent-{str(uuid.uuid4())}",
+            "agent_id": agent.name,
+            "created": int(time.time()),
+            "model": model,
+            "response": response,
+            "messages": agent.memory.get_messages_as_dict(),
+        }
+
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/chat/completions", methods=["POST"])
+async def chat_completions():
+    """Legacy chat completion API endpoint"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"error": "Missing request body"}), 400
+
+        # Extract request parameters
+        model = data.get("model", "openai/gpt-4o")
+        messages = data.get("messages", [])
         temperature = data.get("temperature", 0.7)
-        system_message = next((msg for msg in messages if msg.get("role") == "system"), None)
 
-        # Format messages for LLM
-        system_msgs = [system_message] if system_message else None
-        user_msgs = [msg for msg in messages if msg.get("role") != "system"]
-
-        # Get LLM instance based on model name
+        # For compatibility, get a simple LLM instance
         config_name = "default"
         if model.startswith("anthropic/"):
             config_name = "anthropic"
         elif model.startswith("mistral/"):
             config_name = "mistral"
+        elif model.startswith("google/"):
+            config_name = "gemini"
 
-        global llm_client
-        if not llm_client:
-            llm_client = {}
+        llm = LLM(config_name=config_name)
 
-        if config_name not in llm_client:
-            llm_client[config_name] = LLM(config_name=config_name)
-
-        # Process request with LLM
-        response = await llm_client[config_name].ask(
-            messages=user_msgs,
-            system_msgs=system_msgs,
-            stream=stream,
+        # Process request with LLM directly
+        response = await llm.ask(
+            messages=messages,
             temperature=temperature
         )
 
@@ -121,7 +220,9 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8443))
     host = os.environ.get("HOST", "0.0.0.0")
 
-    print(f"Starting HTTPS API server at https://{host}:{port}")
+    print(f"Starting Agent Orchestra API server at https://{host}:{port}")
+    print(f"Agent endpoint: https://{host}:{port}/api/agent/run")
+    print(f"Legacy chat endpoint: https://{host}:{port}/api/chat/completions")
 
     try:
         context = create_ssl_context()
