@@ -5,14 +5,25 @@ import uuid
 import asyncio
 from typing import Dict, List, Optional
 
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+try:
+    from flask import Flask, jsonify, request
+    from flask_cors import CORS
+except ImportError as e:
+    print(f"Error importing Flask dependencies: {e}")
+    print("Please install Flask and Flask-CORS: pip install flask==2.2.3 flask-cors==4.0.0 werkzeug==2.2.3")
+    exit(1)
+
 from werkzeug.serving import run_simple
 
-from app.llm import LLM
-from app.agent.manus import ManusAgent
-from app.agent.toolcall import ToolCallAgent
-from app.schema import Message
+try:
+    from app.llm import LLM
+    from app.agent.manus import ManusAgent
+    from app.agent.toolcall import ToolCallAgent
+    from app.schema import Message
+except ImportError as e:
+    print(f"Error importing application modules: {e}")
+    print("Please make sure all requirements are installed: pip install -r requirements.txt")
+    exit(1)
 
 app = Flask(__name__)
 CORS(app)
