@@ -3,10 +3,11 @@ import ssl
 import time
 import uuid
 import asyncio
+import json
 from typing import Dict, List, Optional
 
 try:
-    from flask import Flask, jsonify, request
+    from flask import Flask, jsonify, request, Response, stream_with_context
     from flask_cors import CORS
 except ImportError as e:
     print(f"Error importing Flask dependencies: {e}")
@@ -107,6 +108,7 @@ async def run_agent():
         messages = data.get("messages", [])
         agent_id = data.get("agent_id")
         task = data.get("task")
+        stream = data.get("stream", False)
 
         # Convert messages to the format expected by the agent
         formatted_messages = []
@@ -128,32 +130,83 @@ async def run_agent():
         for msg in formatted_messages:
             agent.memory.add_message(msg)
 
-        # Set task if provided
+        if stream:
+            # Stream response
+            return Response(
+                stream_with_context(stream_agent_response(agent, task, formatted_messages, model)),
+                content_type='text/event-stream'
+            )
+        else:
+            # Non-streaming response
+            # Set task if provided
+            if task:
+                # Create a response to process through the agent
+                response = await agent.process_task(task)
+            else:
+                # Use the last user message as the task
+                last_user_msg = next((msg for msg in reversed(formatted_messages)
+                                    if isinstance(msg, Message) and msg.role == "user"), None)
+                if last_user_msg:
+                    response = await agent.process_message(last_user_msg.content)
+                else:
+                    return jsonify({"error": "No user message or task provided"}), 400
+
+            # Format response
+            result = {
+                "id": f"agent-{str(uuid.uuid4())}",
+                "agent_id": agent.name,
+                "created": int(time.time()),
+                "model": model,
+                "response": response,
+                "messages": agent.memory.get_messages_as_dict(),
+            }
+
+            return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+async def stream_agent_response(agent, task, formatted_messages, model):
+    """Generator function for streaming agent responses"""
+    try:
+        # Send event with response metadata
+        event_id = f"agent-{str(uuid.uuid4())}"
+        yield f"id: {event_id}\n"
+        yield f"event: metadata\n"
+        yield f"data: {{\n"
+        yield f"data: \"id\": \"{event_id}\",\n"
+        yield f"data: \"agent_id\": \"{agent.name}\",\n"
+        yield f"data: \"created\": {int(time.time())},\n"
+        yield f"data: \"model\": \"{model}\"\n"
+        yield f"data: }}\n\n"
+
+        # Determine what to process
         if task:
-            # Create a response to process through the agent
-            response = await agent.process_task(task)
+            # Create a response generator to process through the agent
+            response_generator = agent.process_task_stream(task)
         else:
             # Use the last user message as the task
             last_user_msg = next((msg for msg in reversed(formatted_messages)
                                 if isinstance(msg, Message) and msg.role == "user"), None)
             if last_user_msg:
-                response = await agent.process_message(last_user_msg.content)
+                response_generator = agent.process_message_stream(last_user_msg.content)
             else:
-                return jsonify({"error": "No user message or task provided"}), 400
+                yield f"event: error\n"
+                yield f"data: No user message or task provided\n\n"
+                return
 
-        # Format response
-        result = {
-            "id": f"agent-{str(uuid.uuid4())}",
-            "agent_id": agent.name,
-            "created": int(time.time()),
-            "model": model,
-            "response": response,
-            "messages": agent.memory.get_messages_as_dict(),
-        }
+        # Stream the agent's response
+        async for chunk in response_generator:
+            yield f"event: chunk\n"
+            yield f"data: {chunk}\n\n"
 
-        return jsonify(result)
+        # Send completion event
+        yield f"event: done\n"
+        yield f"data: {{\n"
+        yield f"data: \"messages\": {json.dumps(agent.memory.get_messages_as_dict())}\n"
+        yield f"data: }}\n\n"
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        yield f"event: error\n"
+        yield f"data: {str(e)}\n\n"
 
 @app.route("/api/chat/completions", methods=["POST"])
 async def chat_completions():
@@ -167,6 +220,7 @@ async def chat_completions():
         model = data.get("model", "openai/gpt-4o")
         messages = data.get("messages", [])
         temperature = data.get("temperature", 0.7)
+        stream = data.get("stream", False)
 
         # For compatibility, get a simple LLM instance
         config_name = "default"
@@ -179,33 +233,102 @@ async def chat_completions():
 
         llm = LLM(config_name=config_name)
 
-        # Process request with LLM directly
-        response = await llm.ask(
-            messages=messages,
-            temperature=temperature
-        )
+        if stream:
+            # Stream response
+            return Response(
+                stream_with_context(stream_chat_response(llm, messages, temperature, model)),
+                content_type='text/event-stream'
+            )
+        else:
+            # Process request with LLM directly (non-streaming)
+            response = await llm.ask(
+                messages=messages,
+                temperature=temperature,
+                stream=False
+            )
 
-        # Format response
-        result = {
-            "id": f"chatcmpl-{str(uuid.uuid4())}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": response
-                    },
-                    "finish_reason": "stop"
-                }
-            ]
-        }
+            # Format response
+            result = {
+                "id": f"chatcmpl-{str(uuid.uuid4())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": response
+                        },
+                        "finish_reason": "stop"
+                    }
+                ]
+            }
 
-        return jsonify(result)
+            return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+async def stream_chat_response(llm, messages, temperature, model):
+    """Generator function for streaming chat completions"""
+    try:
+        # Send initial response message
+        event_id = f"chatcmpl-{str(uuid.uuid4())}"
+        yield f"data: {{\n"
+        yield f"data: \"id\": \"{event_id}\",\n"
+        yield f"data: \"object\": \"chat.completion.chunk\",\n"
+        yield f"data: \"created\": {int(time.time())},\n"
+        yield f"data: \"model\": \"{model}\",\n"
+        yield f"data: \"choices\": [{{\n"
+        yield f"data: \"index\": 0,\n"
+        yield f"data: \"delta\": {{\n"
+        yield f"data: \"role\": \"assistant\"\n"
+        yield f"data: }}\n"
+        yield f"data: }}]\n"
+        yield f"data: }}\n\n"
+
+        # Stream the response content
+        response_generator = llm.ask(
+            messages=messages,
+            temperature=temperature,
+            stream=True
+        )
+
+        async for chunk in response_generator:
+            if chunk:
+                yield f"data: {{\n"
+                yield f"data: \"id\": \"{event_id}\",\n"
+                yield f"data: \"object\": \"chat.completion.chunk\",\n"
+                yield f"data: \"created\": {int(time.time())},\n"
+                yield f"data: \"model\": \"{model}\",\n"
+                yield f"data: \"choices\": [{{\n"
+                yield f"data: \"index\": 0,\n"
+                yield f"data: \"delta\": {{\n"
+                yield f"data: \"content\": {json.dumps(chunk)}\n"
+                yield f"data: }}\n"
+                yield f"data: }}]\n"
+                yield f"data: }}\n\n"
+
+        # Send completion message
+        yield f"data: {{\n"
+        yield f"data: \"id\": \"{event_id}\",\n"
+        yield f"data: \"object\": \"chat.completion.chunk\",\n"
+        yield f"data: \"created\": {int(time.time())},\n"
+        yield f"data: \"model\": \"{model}\",\n"
+        yield f"data: \"choices\": [{{\n"
+        yield f"data: \"index\": 0,\n"
+        yield f"data: \"delta\": {{}},\n"
+        yield f"data: \"finish_reason\": \"stop\"\n"
+        yield f"data: }}]\n"
+        yield f"data: }}\n\n"
+
+        # Send [DONE] to signify the end of the stream
+        yield f"data: [DONE]\n\n"
+    except Exception as e:
+        yield f"data: {{\n"
+        yield f"data: \"error\": \"{str(e)}\"\n"
+        yield f"data: }}\n\n"
+        yield f"data: [DONE]\n\n"
 
 def create_ssl_context():
     """Create SSL context for HTTPS"""
