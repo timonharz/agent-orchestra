@@ -179,3 +179,94 @@ Agent Orchestra is released under the MIT License. See the [LICENSE](LICENSE) fi
 This project builds upon and draws inspiration from various open-source projects in the AI agent space. We extend our gratitude to all contributors of these projects for their valuable work.
 
 Special thanks to [anthropic-computer-use](https://github.com/anthropics/anthropic-quickstarts/tree/main/computer-use-demo) and [browser-use](https://github.com/browser-use/browser-use) for providing foundational capabilities.
+
+## Deployment Options
+
+### Option 1: Direct Deployment (Not Recommended for Production)
+
+Run the server directly, but note that port 80 requires root privileges:
+
+```bash
+sudo python3 server.py
+```
+
+Alternatively, use a higher port number:
+
+```bash
+PORT=8080 python3 server.py
+```
+
+### Option 2: Systemd Service
+
+Use the provided deployment script:
+
+```bash
+sudo ./deploy.sh
+```
+
+This creates and starts a systemd service running on port 80.
+
+### Option 3: Docker (Recommended)
+
+The easiest way to run the server without root privileges:
+
+```bash
+docker-compose up -d
+```
+
+### Option 4: Nginx with HTTPS (Best for Production)
+
+For a production environment, use Nginx as a reverse proxy with proper SSL certificates:
+
+1. Run the deployment script with your domain name:
+
+```bash
+sudo ./deploy-with-nginx.sh your-domain.com
+```
+
+This script:
+- Installs Nginx and Certbot
+- Configures the Agent Orchestra app to run on port 8080
+- Sets up Nginx as a reverse proxy
+- Obtains and configures SSL certificates via Let's Encrypt
+- Configures HTTP to HTTPS redirection
+
+Your API will be accessible at `https://your-domain.com`.
+
+#### Manual Setup
+
+If you prefer to set up Nginx manually:
+
+1. Run the server on a non-privileged port:
+```bash
+PORT=8080 python3 server.py
+```
+
+2. Install Nginx:
+```bash
+sudo apt-get install nginx
+```
+
+3. Use our provided Nginx config:
+```bash
+sudo cp nginx.conf /etc/nginx/sites-available/agent-orchestra
+```
+
+4. Edit the config file to match your domain:
+```bash
+sudo nano /etc/nginx/sites-available/agent-orchestra
+```
+
+5. Enable the site and get SSL certificates:
+```bash
+sudo ln -s /etc/nginx/sites-available/agent-orchestra /etc/nginx/sites-enabled/
+sudo certbot --nginx -d your-domain.com
+sudo systemctl restart nginx
+```
+
+## API Endpoints
+
+- `GET /health` - Health check
+- `GET /api/models` - List available models
+- `POST /api/agent/run` - Run agent with messages
+- `POST /api/chat/completions` - Legacy chat completion API
