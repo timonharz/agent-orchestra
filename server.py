@@ -17,7 +17,7 @@ from werkzeug.serving import run_simple
 
 try:
     from app.llm import LLM
-    from app.agent.manus import ManusAgent
+    from app.agent.manus import Manus
     from app.agent.toolcall import ToolCallAgent
     from app.schema import Message
 except ImportError as e:
@@ -83,7 +83,7 @@ def get_agent_for_model(model_name: str, agent_id: str = None):
         )
     else:
         # Default agent
-        agent = ManusAgent(
+        agent = Manus(
             name=agent_id,
             llm=llm,
             description="General-purpose agent with tool-using capabilities"
